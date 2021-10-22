@@ -1,0 +1,493 @@
+---
+title: "KMeans Sensitivity"
+author: "David Knorr"
+date: "March 20, 2019"
+output:
+    pdf_document:
+        includes:
+            in_header: header.tex 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pacman)
+p_load(tidyverse, feather, pcaPP, tigris, factoextra, cluster, gridExtra, sf, Gmedian, knitr, kableExtra)
+
+
+
+rawall <- readRDS("C://School//Research//Predictive Variables//Master//AllVars10to16.rds") 
+raw10named <- rawall %>% dplyr::filter(year == 2010) %>% dplyr::select(CensusTractID)
+raw10 <- rawall %>% dplyr::filter(year == 2010) %>% dplyr::select(-year)
+raw16 <- rawall %>% dplyr::filter(year == 2016) %>% dplyr::select(-year)
+
+Davidson <- tracts("TN", "Davidson")
+
+All_Census <- readRDS("C://School//Research//Predictive Variables//Master//All_Census.rds")
+recent <- All_Census %>% dplyr::select(CensusTractID, MedHomevalue, MedRent, MedIncome, CollegePct, Pct_Renters, Pct_Vacant, Pct_MultiUnit, NonFamPct, PctNonWhite, Under18, Over65x, PovertyPct, UnemploymentPct, year)
+
+x1990 <- readRDS("Raw90.rds") %>% mutate(year = 1990) %>% select(CensusTractID, homeValue, rent, Income, PctCollege, PctRenters, PctVacant, Pct_MultiUnit, PctNonFam, PctNonWhite, Under18, Over65x, Pct_Poverty, Pct_Unemployed, year)
+x2000 <- readRDS("Raw00.rds") %>% mutate(year= 2000) %>% select(CensusTractID, homeValue, rent, Income, PctCollege, PctRenters, PctVacant, Pct_MultiUnit, PctNonFam, PctNonWhite, Under18, Over65x, Pct_Poverty, Pct_Unemployed, year)
+
+names(x1990) <- names(recent)
+names(x2000) <- names(recent)
+
+All_data1 <- rbind(recent,x1990)
+All_data <- rbind(All_data1, x2000)
+
+
+```
+
+
+
+```{r sensitivity, echo = FALSE, warning=FALSE, message=FALSE, results='asis'}
+for(k in seq(2,5, by = 1)){
+inputVars1 <-c("CensusTractID", "year", "MedHomevalue", "MedRent", "MedIncome", "CollegePct",  "PctNonWhite", "Pct_MultiUnit")
+
+inputVars2<- c("CensusTractID", "year", "MedHomevalue", "MedRent", "MedIncome", "CollegePct", "Pct_Renters", "PctNonWhite")
+ 
+inputVars3 <-  c("CensusTractID", "year", "MedRent", "MedIncome", "CollegePct", "Pct_Renters", "PctNonWhite")
+
+inputVars4 <-  c("CensusTractID", "year", "MedRent", "MedIncome", "PctNonWhite")
+
+All_data_sub <- All_data %>% dplyr::select(.dots = inputVars1)
+names(All_data_sub) <- inputVars1
+
+start_yr <- 2000
+end_yr <- 2016
+
+xstart <- All_data_sub %>% dplyr::filter(year == start_yr & complete.cases(.)) %>% dplyr::select(-year)
+xend <- All_data_sub %>% dplyr::filter(year == end_yr & complete.cases(.)) %>% dplyr::select(-year)
+
+
+#make sure same census tracts are in both DFs (have to be exact for matrix math later)
+first <- c(xstart$CensusTractID)
+second <- c(xend$CensusTractID)
+
+both <- first[first %in% second] # in both, same as call: intersect(first, second)
+onlyfirst <- first[!first %in% second] # only in 'first', same as: setdiff(first, second)
+onlysecond <- second[!second %in% first]
+
+data_start <- xstart %>% dplyr::filter(CensusTractID %in% both)
+data_end <- xend %>% dplyr::filter(CensusTractID %in% both)
+
+#perform matrix math but keep TractID
+if(length(All_data_sub == 8)){
+xchangedata_med <- 100 * (data_end[2:4] - data_start[2:4]) / data_start[2:4]
+xchangedata_pcts <- data_end[5:ncol(data_end)] - data_start[5:ncol(data_start)] 
+xchangedata <- cbind(xchangedata_med, xchangedata_pcts)
+} else {
+  xchangedata_med <- 100 * (data_end[2:3] - data_start[2:3]) / data_start[2:3]
+  xchangedata_pcts <- data_end[4:ncol(data_end)] - data_start[4:ncol(data_start)] 
+  xchangedata <- cbind(xchangedata_med, xchangedata_pcts)
+}
+
+fullt <- data_start %>% cbind(data_end) %>% cbind(xchangedata)
+Davidson@data$JOINID = as.character(Davidson@data$GEOID)
+sp_jn1 <- geo_join(spatial_data = Davidson, data_frame = fullt, by_sp = "JOINID", by_df = "CensusTractID", how = "inner")
+#writeOGR(obj=sp_jn1, dsn="C://School//Research//Predictive Variables//Master//FinalPredictions", layer="ClusterStats", driver="ESRI Shapefile")
+
+
+rownames(xchangedata) <- data_start$CensusTractID
+xchangedata$ID <- both
+
+xchangedata <- xchangedata %>% dplyr::filter(complete.cases(.))
+xchangedata <- xchangedata[!is.infinite(rowSums(xchangedata[,1:(ncol(xchangedata)-1)])),]
+#set.seed(43) for plots
+set.seed(43)
+
+labelnames <- "ID"
+labels<- xchangedata[labelnames]
+km_labels <- c(xchangedata$ID)
+
+
+scaled <- scale(xchangedata[1:(ncol(xchangedata)-1)])
+
+
+km_out1 <- kmeans(scaled, centers = k, nstart = 50)
+results  <- data.frame(km_out1$cluster,xchangedata$ID)
+colnames(results) <- c("cluster_code","CensusTractID")
+
+k4swap <- data.frame(c(1 ,2, 3, 4), c(1, 3, 4, 2)) 
+names(k4swap) <- c("Orig", "Correct")
+
+k5swap <- data.frame(c(1 ,2, 3, 4, 5), c(1, 3, 5, 2, 4)) 
+names(k5swap) <- c("Orig", "Correct")
+
+if(k == 4){
+  res <- results %>% inner_join(., k4swap, by = c("cluster_code"= "Orig"))
+  results <- res %>% dplyr::select(CensusTractID, cluster_code = Correct)
+} else if (k == 5) {
+  res <- results %>% inner_join(., k5swap, by = c("cluster_code"= "Orig"))
+  results <- res %>% dplyr::select(CensusTractID, cluster_code = Correct)
+}
+
+v1 <- fviz_nbclust(scaled, kmeans, method = "silhouette", print.summary = TRUE)
+v2 <- fviz_nbclust(scaled, kmeans, method = "wss")
+
+assign(paste0("kdf",k), results)
+
+#grid.arrange(v1, v2)
+Davidson@data$JOINID = as.character(Davidson@data$GEOID)
+sp_jn2 <- geo_join(spatial_data = Davidson, data_frame = results, by_sp = "JOINID", by_df = "CensusTractID", how = "left")
+
+Davidson_SF <- st_as_sf(sp_jn2)
+
+colors <- c("cornflowerblue", "tomato", "seagreen", "darkgoldenrod4","purple4")
+cols <- c("cornflowerblue", "tomato", "seagreen", "darkgoldenrod4","purple4")
+
+k4plot <- ggplot(Davidson_SF) + geom_sf(aes(fill = factor(cluster_code))) + coord_sf() + theme(legend.position="none") + scale_fill_manual(values = colors, name = "Cluster", na.value="black") + theme(legend.position = "right")  + theme(axis.text = element_blank(), axis.ticks = element_blank()) + labs(title = "Nashville Neighborhood Change Clusters", subtitle = paste(start_yr,"-", end_yr))
+
+Kplot <- ggplot(Davidson_SF) + geom_sf(aes(fill = factor(cluster_code))) + coord_sf() + theme(legend.position="none") + scale_fill_manual(values = colors, name = "Cluster", na.value="black") + theme(legend.position = "right")  + theme(axis.text = element_blank(), axis.ticks = element_blank()) + labs(title = paste0("K =", k))
+
+print(Kplot)
+
+
+JoinedOriginal <- inner_join(x = results, y = xchangedata, by = c("CensusTractID" = "ID"))
+
+SummaryClusters <- JoinedOriginal %>% dplyr::select(-CensusTractID) %>% group_by(cluster_code) %>% summarise_all(funs(mean)) %>% mutate_at(2:(length(JoinedOriginal)-1), funs(round(., 2))) 
+
+##summary stats for clusters
+Cluster_results  <- data.frame(results$cluster_code,xchangedata)
+Cluster_grouped_means <- Cluster_results %>% dplyr::select(-ID) %>% group_by(results.cluster_code) %>% summarize_all("mean") %>% ungroup()
+
+
+#sum1 <- Cluster_results %>% dplyr::select(-ID) %>% filter(cluster_code == 1) %>% summarise_all(c("min", "max", "mean", "median", "sd"))  
+
+#if(k == 2){KText = as.symbol(paste0("index = c\(\"K1\" = 5, \"K2\" = 10\)"))}
+
+meltedsummary <- Cluster_results %>% dplyr::select(-ID) %>% reshape2::melt(id.vars = "results.cluster_code") %>% group_by(results.cluster_code, variable) %>% summarize(mean = round(mean(value),2), median = round(median(value),2), min = round(min(value),2), max = round(max(value),2), sd = round(sd(value),2), count = n()) %>% ungroup()
+
+counts <- unique(meltedsummary$count)
+
+cat("\n")
+
+summarytable <- kable(meltedsummary, "latex", longtable = TRUE , booktabs = T, col.names = c("Cluster", "Variable", "Mean", "Median", "Min.", "Max.", "SD", "Count"), escape = T, caption = paste0("Summary Statistics for K =",as.character(k)), format.args = list(big.mark = ","), linesep = c("", "", "","","", "\\addlinespace")) %>% kable_styling(position = "center",font_size = 11, latex_options = c("hold_position", "repeat_header"))
+
+print(summarytable, table.placement = "!ht")
+
+cat("\n")
+}
+```
+\newpage
+
+\blandscape
+
+```{r addlplots, warning =FALSE, message=FALSE, echo=FALSE,fig.height = 7, fig.width = 12, fig.align = "center"}
+
+k2 <- kmeans(scaled, centers = 2, nstart = 25)
+k3 <- kmeans(scaled, centers = 3, nstart = 25)
+k4 <- kmeans(scaled, centers = 4, nstart = 25)
+k5 <- kmeans(scaled, centers = 5, nstart = 25)
+
+# plots to compare
+p1 <- fviz_cluster(k2, geom = "point", data = scaled) + ggtitle("k = 2") +
+  theme_minimal()
+p2 <- fviz_cluster(k3, geom = "point",  data = scaled) + ggtitle("k = 3")+
+  theme_minimal()
+p3 <- fviz_cluster(k4, geom = "point",  data = scaled) + ggtitle("k = 4")+
+  theme_minimal()
+p4 <- fviz_cluster(k5, geom = "point",  data = scaled) + ggtitle("k = 5")+
+  theme_minimal()
+
+
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+\elandscape
+
+```{r finaltables, warning =FALSE, message=FALSE, echo=FALSE}
+Cluster_results4  <- data.frame(kdf4$cluster_code,xchangedata)
+Cluster_grouped_means4 <- Cluster_results4 %>% dplyr::select(-ID) %>% group_by(kdf4.cluster_code) %>% summarize_all("mean") %>% ungroup()
+
+meltedsummary4 <- Cluster_results4 %>% dplyr::select(-ID) %>% reshape2::melt(id.vars = "kdf4.cluster_code") %>% group_by(kdf4.cluster_code, variable) %>% summarize(mean = mean(value), min = min(value), median = median(value), max = max(value), sd = sd(value), count = n()) %>% ungroup()
+
+clean_vars <- c("Home Value", "Rent Value", "Household Income", "Percent College", "Percent Non-white", "Percent Multi-unit Housing")
+
+clean_var_tbl4 <- data.frame(unique(meltedsummary4$variable), clean_vars) %>% setNames(., c("old", "cleaned"))
+
+clean_summary4 <- inner_join(meltedsummary4, clean_var_tbl4, by = c("variable" = "old")) %>% dplyr::select(Cluster = kdf4.cluster_code, Variable = cleaned, mean, median, min, max, sd, count)
+
+All_summary4 <- Cluster_results4 %>% dplyr::select(-kdf4.cluster_code) %>% reshape2::melt(id.vars = "ID") %>% group_by(variable) %>% summarize(mean = mean(value), min = min(value), median = median(value), max = max(value), sd = sd(value), count = n()) %>% mutate(Cluster = 0) %>% ungroup()
+
+clean_all_summary4 <- inner_join(All_summary4, clean_var_tbl4, by = c("variable" = "old")) %>% dplyr::select(Cluster, Variable = cleaned, mean, median, min, max, sd, count)
+
+ALL_summary4 <- rbind(clean_all_summary4, clean_summary4)
+
+rounded <- ALL_summary4 %>% mutate_if(is.numeric, round, 1) %>% dplyr::select(-Cluster, -count) 
+
+kable(rounded, "latex", col.names = c("", "Mean", "Median", "Min.", "Max.", "SD"), booktabs = T, escape = F) %>% group_rows("Davidson County (n = 153)", 1,6) %>% group_rows("K1 (n = 50)", 7, 12) %>% group_rows("K2 (n = 20)", 13,18) %>% group_rows("K3 (n = 79)", 19, 24) %>% group_rows("K4 (n = 4)", 25, 30)
+
+
+```
+
+
+```{r radar,  warning =FALSE, message=FALSE, echo=FALSE}
+groups <- c("K1", "K2", "K3", "K4")
+scaledx <- data.frame(scale(Cluster_grouped_means4[-1]))
+dat2 <- data.frame(lapply(scaledx, function(x) as.numeric(as.character(x)))) %>% cbind(groups)
+data2 <- dat2 %>% select(MedHomevalue, MedRent, MedIncome, CollegePct,Pct_MultiUnit, PctNonWhite, groups)
+
+
+names(data2) <- c("Home Value", "Rent", "Income", "College", "Non-White","Multi-Unit", "Cluster")
+
+
+gathered <- reshape2::melt(data2, id.vars = "Cluster")
+
+colors <- c("cornflowerblue","tomato","seagreen", "darkgoldenrod4")
+groups <- c("K1", "K2", "K3", "K4")
+matchdf <- data.frame(groups, colors)
+
+plotdf <- inner_join(gathered, matchdf, by = c("Cluster" = "groups"))
+
+plotdf1 <- plotdf %>% dplyr::filter(Cluster == "K1")
+plotdf2 <- plotdf %>% dplyr::filter(Cluster == "K2")
+plotdf3 <- plotdf %>% dplyr::filter(Cluster == "K3")
+plotdf4 <- plotdf %>% dplyr::filter(Cluster == "K4")
+nationsdf1 <- read.csv("Nations.csv")
+scalenations <- data.frame(lapply(scaledx, function(x) as.numeric(as.character(x)))) 
+
+coord_radar <- 
+  function(theta='x', start=0, direction=1){
+    # input parameter sanity check
+    match.arg(theta, c('x','y'))
+    
+    ggproto(
+      NULL, CoordPolar, 
+      theta=theta, r=ifelse(theta=='x','y','x'),
+      start=start, direction=sign(direction),
+      is_linear=function() TRUE)
+  }
+
+
+kfing1<- ggplot(plotdf1, aes(x= variable, y = value, group = Cluster, fill = Cluster, col = Cluster))  + coord_radar() +
+  geom_polygon(size = 1, alpha= 0.5)+
+  ylim(-2.0, 2.0)  + 
+  scale_x_discrete() +
+  theme_light() + scale_color_manual(values= colors[[1]])+
+  scale_fill_manual(values= colors[[1]])+ labs(x= "", y = "Scaled Value")
+
+kfing2<- ggplot(plotdf2, aes(x= variable, y = value, group = Cluster, fill = Cluster, col = Cluster))  + coord_radar() +
+  geom_polygon(size = 1, alpha= 0.5)+
+  ylim(-2.0, 2.0) + 
+  scale_x_discrete() +
+  theme_light() + scale_color_manual(values= colors[[2]])+
+  scale_fill_manual(values= colors[[2]])+ labs(x= "", y = "Scaled Value")
+
+kfing4<- ggplot(plotdf4, aes(x= variable, y = value, group = Cluster, fill = Cluster, col = Cluster))  + coord_radar() +
+  geom_polygon(size = 1, alpha= 0.5)+
+  ylim(-2.0, 2.0)  + 
+  scale_x_discrete() +
+  theme_light() + scale_color_manual(values= colors[[4]])+
+  scale_fill_manual(values= colors[[4]])+ labs(x= "", y = "Scaled Value")
+
+kfing3<- ggplot(plotdf3, aes(x= variable, y = value, group = Cluster, fill = Cluster, col = Cluster))  + coord_radar() +
+  geom_polygon(size = 1, alpha= 0.5)+
+  ylim(-2.0, 2.0)  + 
+  scale_x_discrete() +
+  theme_light() + scale_color_manual(values= colors[[3]])+
+  scale_fill_manual(values= colors[[3]])+ labs(x= "", y = "Scaled Value")
+
+NationsRadar <- ggplot(nationsdf1, aes(x= variable, y = value, group = Cluster, fill = Cluster, col = Cluster))  + coord_radar() +
+  geom_polygon(size = 1, alpha= 0.5)+
+  ylim(-2.0, 2.0)  + 
+  scale_x_discrete() +
+  theme_light() + scale_color_manual(values= colors[[3]])+
+  scale_fill_manual(values= colors[[3]])+ labs(x= "", y = "Scaled Value")
+
+#grid.arrange(kfing1, kfing2, kfing3, kfing4, nrow=2)
+
+kfing1
+kfing2
+kfing3
+kfing4
+```
+
+\newpage
+
+\blandscape
+```{r boxplots, warning=FALSE, echo = FALSE, message=FALSE, fig.height = 7, fig.width = 12, fig.align = "center"}
+boxdata <- inner_join(x = kdf4, y = xchangedata, by = c("CensusTractID" = "ID"))
+meltforbox <- boxdata[-1] %>% reshape2::melt(id.vars = "cluster_code") %>% mutate(lab = as.factor(paste0("K",cluster_code)))
+
+allforbox <- boxdata[-1] %>% reshape2::melt(id.vars = "cluster_code") %>% mutate(lab = as.factor("Davidson County"))
+
+ALLBOX <- rbind(meltforbox, allforbox) %>% inner_join(., clean_var_tbl4, by = c("variable" = "old"))
+
+labx <- c("MedHomevalue" = "Percent Change Median Home Value", "MedRent" = "Percent Change Median Rent Value", "MedIncome" = "Percent Change Median Income", "CollegePct" = "Percent Change College Education", "Pct_MultiUnit" = "Percent Change Multi-unit Housing", "PctNonWhite" = "Percent Change Non-white")
+
+ggplot(data = ALLBOX, aes(x = variable, y = value)) + geom_boxplot(aes(fill = lab), outlier.shape = NA) + scale_fill_manual(values = c( "cornflowerblue","tomato","seagreen", "darkgoldenrod4", "gray")) +labs(x="", y="") + facet_wrap( ~ variable, scales="free", labeller = as_labeller(labx)) + 
+  theme(strip.text.x = element_text(size = 12, face = "bold"), strip.background = element_blank(),
+        strip.text.y = element_blank(), axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), legend.title=element_blank())
+```
+\elandscape
+
+```{r joincout, warning = FALSE, message = FALSE, echo =FALSE, fig.height = 8, fig.width = 8, fig.align = "center"}
+p_load(spdep, maptools)
+Class_sp <- geo_join(spatial_data = Davidson, data_frame = kdf4, by_sp = "JOINID", by_df = "CensusTractID", how = "inner")
+
+adj_mat_queen<- poly2nb(Class_sp, queen = T)
+
+spw_list_queen <- nb2listw(adj_mat_queen, style = "C")
+
+jc_test_queen <- joincount.mc(as.factor(Class_sp$cluster_code), spw_list_queen, nsim = 10000)
+
+
+adj_mat_queen2 <- nblag_cumul(nblag(adj_mat_queen, 2))
+spw_list_queen2 <- nb2listw(adj_mat_queen2, style = "C")
+
+jc_test_queen2 <- joincount.mc(as.factor(Class_sp$cluster_code), spw_list_queen2, nsim = 10000)
+
+
+#summary table 
+qID <- as.character(c("K1", "K2", "K3", "K4"))
+q1 <- as.numeric(c(jc_test_queen[[1]]$p.value, jc_test_queen[[2]]$p.value, jc_test_queen[[3]]$p.value, jc_test_queen[[4]]$p.value))
+q2 <- as.numeric(c(jc_test_queen2[[1]]$p.value, jc_test_queen2[[2]]$p.value, jc_test_queen2[[3]]$p.value, jc_test_queen2[[4]]$p.value))
+
+FinalJC_Table <- data.frame(qID, q1, q2)
+roundedjc <- FinalJC_Table %>% mutate_if(is.numeric, round, 4)  
+
+kable(roundedjc, "latex", col.names = linebreak(c("", "First-Order QC\np-value", "Second-Order QC\np-value"),align = "c"), booktabs = T, escape = F) %>% kable_styling(position = "center")
+
+#par(mfrow= c(1,2), mar=c(3,3,3,3))
+coords <- coordinates(Class_sp)
+
+plot(Class_sp, main = "First Order Queen")
+plot(adj_mat_queen, coords, add = TRUE, col = "red")
+
+plot(Class_sp, main = "Second Order Queen")
+plot(adj_mat_queen2, coords, add = TRUE, col = "blue")
+
+x <- 122
+ind <- unlist(adj_mat_queen[x])
+alladj <- Class_sp[ind,]
+
+ind2 <- unlist(adj_mat_queen2[x])
+alladj2 <- Class_sp[ind2,]
+
+plot(alladj, col = "red")
+plot(Class_sp[x,], col = "yellow" , add = TRUE)
+
+plot(alladj2, col = "blue")
+plot(Class_sp[x,], col = "yellow" , add = TRUE)
+
+```
+
+```{r k0016, warning = FALSE, message = FALSE, echo = FALSE}
+All_data_sub <- All_data %>% dplyr::select(.dots = inputVars1)
+names(All_data_sub) <- inputVars1
+k <- 4
+start_yr <- 2000
+end_yr <- 2016
+
+xstart <- All_data_sub %>% dplyr::filter(year == start_yr & complete.cases(.)) %>% dplyr::select(-year)
+xend <- All_data_sub %>% dplyr::filter(year == end_yr & complete.cases(.)) %>% dplyr::select(-year)
+
+
+#make sure same census tracts are in both DFs (have to be exact for matrix math later)
+first <- c(xstart$CensusTractID)
+second <- c(xend$CensusTractID)
+
+both <- first[first %in% second] # in both, same as call: intersect(first, second)
+onlyfirst <- first[!first %in% second] # only in 'first', same as: setdiff(first, second)
+onlysecond <- second[!second %in% first]
+
+data_start <- xstart %>% dplyr::filter(CensusTractID %in% both)
+data_end <- xend %>% dplyr::filter(CensusTractID %in% both)
+
+#perform matrix math but keep TractID
+if(length(All_data_sub == 8)){
+xchangedata_med <- 100 * (data_end[2:4] - data_start[2:4]) / data_start[2:4]
+xchangedata_pcts <- data_end[5:ncol(data_end)] - data_start[5:ncol(data_start)] 
+xchangedata <- cbind(xchangedata_med, xchangedata_pcts)
+} else {
+  xchangedata_med <- 100 * (data_end[2:3] - data_start[2:3]) / data_start[2:3]
+  xchangedata_pcts <- data_end[4:ncol(data_end)] - data_start[4:ncol(data_start)] 
+  xchangedata <- cbind(xchangedata_med, xchangedata_pcts)
+}
+
+
+rownames(xchangedata) <- data_start$CensusTractID
+xchangedata$ID <- both
+
+xchangedata <- xchangedata %>% dplyr::filter(complete.cases(.))
+xchangedata <- xchangedata[!is.infinite(rowSums(xchangedata[,1:(ncol(xchangedata)-1)])),]
+#set.seed(43) for plots
+set.seed(43)
+
+labelnames <- "ID"
+labels<- xchangedata[labelnames]
+km_labels <- c(xchangedata$ID)
+
+
+scaled <- scale(xchangedata[1:(ncol(xchangedata)-1)])
+
+
+km_out1 <- kmeans(scaled, centers = k, nstart = 50)
+results  <- data.frame(km_out1$cluster,xchangedata$ID)
+colnames(results) <- c("cluster_code","CensusTractID")
+
+k4swap <- data.frame(c(1 ,2, 3, 4), c(1, 2, 4, 3)) 
+names(k4swap) <- c("Orig", "Correct")
+
+k5swap <- data.frame(c(1 ,2, 3, 4, 5), c(1, 3, 5, 2, 4)) 
+names(k5swap) <- c("Orig", "Correct")
+
+if(k == 4){
+  res <- results %>% inner_join(., k4swap, by = c("cluster_code"= "Orig"))
+  results <- res %>% select(CensusTractID, cluster_code = Correct)
+} else if (k == 5) {
+  res <- results %>% inner_join(., k5swap, by = c("cluster_code"= "Orig"))
+  results <- res %>% select(CensusTractID, cluster_code = Correct)
+}
+
+v1 <- fviz_nbclust(scaled, kmeans, method = "silhouette", print.summary = TRUE)
+v2 <- fviz_nbclust(scaled, kmeans, method = "wss")
+
+assign(paste0("kdf",k), results)
+
+#grid.arrange(v1, v2)
+Davidson@data$JOINID = as.character(Davidson@data$GEOID)
+sp_jn2 <- geo_join(spatial_data = Davidson, data_frame = results, by_sp = "JOINID", by_df = "CensusTractID", how = "left")
+
+p_load(rgdal, GISTools)
+#writeOGR(sp_jn2, dsn = "C://School//Research//Predictive Variables//Master/FinalPredictions//FinalPredictions", layer = "Cluster1016", driver = "ESRI Shapefile")
+
+Davidson_SF <- st_as_sf(sp_jn2)
+
+colors <- c("cornflowerblue", "tomato", "seagreen", "darkgoldenrod4","purple4")
+cols <- c("cornflowerblue", "tomato", "seagreen", "darkgoldenrod4","purple4")
+
+#ggplot(Davidson_SF) + geom_sf(aes(fill = factor(cluster_code))) + coord_sf() + theme(legend.position="none") + scale_fill_manual(values = colors, name = "Cluster", na.value="black") + theme(legend.position = "right")  + theme(axis.text = element_blank(), axis.ticks = element_blank()) + labs(title = "Nashville Neighborhood Change Clusters", subtitle = paste(start_yr,"-", end_yr), caption = expression(atop("K = 2 ;Variables =  Home & Rent Values,", paste(" Income, Non-White, College Educated (Percent Changes)"))))
+
+Kplot <- ggplot(Davidson_SF) + geom_sf(aes(fill = factor(cluster_code))) + coord_sf() + theme(legend.position="none") + scale_fill_manual(values = colors, name = "Cluster", na.value="black") + theme(legend.position = "right")  + theme(axis.text = element_blank(), axis.ticks = element_blank()) + labs(title = paste0("K =", k))
+
+print(Kplot)
+
+
+JoinedOriginal <- inner_join(x = results, y = xchangedata, by = c("CensusTractID" = "ID"))
+
+SummaryClusters <- JoinedOriginal %>% dplyr::select(-CensusTractID) %>% group_by(cluster_code) %>% summarise_all(funs(mean)) %>% mutate_at(2:(length(JoinedOriginal)-1), funs(round(., 2))) 
+
+##summary stats for clusters
+Cluster_results  <- data.frame(results$cluster_code,xchangedata)
+Cluster_grouped_means <- Cluster_results %>% dplyr::select(-ID) %>% group_by(results.cluster_code) %>% summarize_all("mean") %>% ungroup()
+
+
+#sum1 <- Cluster_results %>% dplyr::select(-ID) %>% filter(cluster_code == 1) %>% summarise_all(c("min", "max", "mean", "median", "sd"))  
+
+#if(k == 2){KText = as.symbol(paste0("index = c\(\"K1\" = 5, \"K2\" = 10\)"))}
+
+meltedsummary <- Cluster_results %>% dplyr::select(-ID) %>% reshape2::melt(id.vars = "results.cluster_code") %>% group_by(results.cluster_code, variable) %>% summarize(mean = round(mean(value),2), median = round(median(value),2), min = round(min(value),2), max = round(max(value),2), sd = round(sd(value),2), count = n()) %>% ungroup()
+
+counts <- unique(meltedsummary$count)
+
+cat("\n")
+
+summarytable <- kable(meltedsummary, "latex", longtable = TRUE , booktabs = T, col.names = c("Cluster", "Variable", "Mean", "Median", "Min.", "Max.", "SD", "Count"), escape = T, caption = paste0("Summary Statistics for K =",as.character(k)), format.args = list(big.mark = ","), linesep = c("", "", "","","", "\\addlinespace")) %>% kable_styling(position = "center",font_size = 11, latex_options = c("hold_position", "repeat_header"))
+
+print(summarytable, table.placement = "!ht")
+
+cat("\n")
+
+
+```

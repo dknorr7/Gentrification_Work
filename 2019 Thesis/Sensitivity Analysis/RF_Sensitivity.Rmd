@@ -1,0 +1,234 @@
+---
+title: "RandomForest"
+author: "David Knorr"
+date: "March 18, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+
+library(pacman)
+p_load(tidyverse, caret, spdep, rgdal, rgeos, factoextra, tigris, randomForest, pROC, plotROC, knitr, kableExtra, data.table, corrplot, party)
+
+Dependent <- readRDS("DependentVariable.rds")
+Lagged <- readRDS("lagged2000Variables.rds")
+PredictiveVars2000 <- readRDS("PredictiveVars1990_2000.rds") %>% dplyr::select(-contains("90"), - contains("welfare"), -contains("kids"))
+
+knitr::knit_hooks$set(inline = function(x) { if(!is.numeric(x)){ x }else{ prettyNum(round(x,2), big.mark=",") } })
+
+knitr::opts_chunk$set(fig.width=12, fig.height=7) 
+options(knitr.table.format = "latex")
+```
+
+```{r setup1, warning=FALSE, echo=FALSE, message=FALSE}
+randomlist <- sample(1:99999, 200)
+foo <- tibble()
+
+for (i in 1:200){
+set.seed(randomlist[[i]])
+print(i)
+
+
+OrigVs <- c(names(PredictiveVars2000))
+PrettyNamedVs <- c("CensusTractID", "PCTRENTER", "PCTVACANT", "PCTNONFAM", "UNDER18", "OVER65", "PCTPOV", "PCTUNEMPLOY", "PCTNOCAR", "PCT3CAR", "PCTPUBTRANSP", "PCT20MINCOMMUTE", "PCTBLUECOLLAR",  "PCTBIGUNIT", "PCTRENTBURDEN", "PARKCOVERAGE", "DOWNTOWNDISTANCE", "TRANSITCOVERAGE", "EVICTIONRATE", "NEWHOUSING")
+
+#VarSwap <- data.frame(OrigVs, PrettyNamedVs) %>% mutate(joinid = gsub("_", "", OrigVs)) %>% filter(OrigVs != "CensusTractID")
+
+#Variables <- c("BoolGentX", "PCTRENTER", "PCTVACANT", "PCTNONFAM", "UNDER18", "OVER65", "PCTPOV", "PCTUNEMPLOY", "PCTNOCAR", "PCT3CAR", "PCTPUBTRANSP", "PCT20MINCOMMUTE", "PCTBLUECOLLAR", "PCTBIGUNIT", "PCTRENTBURDEN", "PARKCOVERAGE", "DOWNTOWNDISTANCE", "TRANSITCOVERAGE", "EVICTIONRATE")
+
+Variables <- c("BoolGentX", "PCTRENTER", "PCTVACANT", "PCTNONFAM", "UNDER18", "OVER65", "PCTPOV", "PCTUNEMPLOY","PCT3CAR", "PCT20MINCOMMUTE", "PCTBLUECOLLAR", "PCTBIGUNIT", "PCTRENTBURDEN", "PARKCOVERAGE", "DOWNTOWNDISTANCE", "EVICTIONRATE", "NEWHOUSING")
+
+RF_raw1 <- PredictiveVars2000 
+HousingAge <- read_rds("HousingAge2000.rds")
+
+RF_raw <- inner_join(RF_raw1, HousingAge)
+
+
+
+names(RF_raw) <- PrettyNamedVs
+
+RF_named <- RF_raw %>% dplyr::select(CensusTractID)
+
+
+#RF_labeled <- inner_join(Dependent, PredictiveVars2000) %>% dplyr::select(-CensusTractID, -BoolGent)
+#names(RF_labeled) <- Variables
+print("its working")
+RF_labeled <- inner_join(Dependent, RF_raw) %>% dplyr::select(-CensusTractID, -BoolGent, -PCTNOCAR, -TRANSITCOVERAGE, -PCTPUBTRANSP)
+names(RF_labeled) <- Variables
+
+#####################
+# library(mlbench)
+# #Feature Selection
+# correlationMatrix <- cor(RF_labeled[,2:18])
+# # summarize the correlation matrix
+# print(correlationMatrix)
+# # find attributes that are highly corrected (ideally >0.75)
+# highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.75)
+# # print indexes of highly correlated attributes
+# print(highlyCorrelated)
+
+# rctrl1 <- rfeControl(method = "cv",
+#                      number = 3,
+#                      returnResamp = "all",
+#                      functions = caretFuncs,
+#                      saveDetails = TRUE)
+
+#ftmod <- rfe(BoolGentX~., data = RF_labeled, method = "rf", trControl = trainControl(method = "cv", classProbs = TRUE), metric = "ROC", tuneGrid = tunegrid,rfeControl = rctrl1) 
+#####################
+
+trainingindexes <- createDataPartition(RF_labeled$BoolGentX, p = .7, list = FALSE) #maintains proportions of gent/nongent
+train <- RF_labeled[trainingindexes,]
+test <- RF_labeled[-trainingindexes,]
+
+corres <- cor(train[,-1])
+corrplot(corres, type = "upper")
+
+train.control <- trainControl(method = "LOOCV", classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE)
+tunegrid <- expand.grid(.mtry = (2:12))
+
+
+RFmodel<- train(BoolGentX~., data = train, method = "rf", trControl = train.control, metric = "Spec", tuneGrid = tunegrid, importance = TRUE) 
+# 
+# featuremodel <- cforest(BoolGentX~., data = train)
+# actual <- test$BoolGentX
+# predicted <- predict(featuremodel, test, OOB = TRUE)
+# table (true = actual, pred = predict(featuremodel, newdata = test))
+
+#print(RFmodel)
+#plot(RFmodel)
+
+RFmodel_probs <- predict(RFmodel, test, type = "prob") %>% cbind(test$BoolGentX)
+
+RFmodel_probs$BoolGent <- as.factor(ifelse(test$BoolGentX == "X0", 0, 1))
+test$BoolGent <- as.factor(ifelse(test$BoolGentX == "X0", 0, 1))
+
+RFmodel_thresholds <- SDMTools::optim.thresh(test$BoolGent, RFmodel_probs$X0)
+
+RFmodel_preds <- RFmodel_probs %>% mutate(FinalPred = as.factor(ifelse(`X0` <= RFmodel_thresholds$`sensitivity=specificity`[1], 1, 0)))
+
+# cm2000 <- confusionMatrix(RFmodel_preds$FinalPred, test$BoolGent, positive = "1")
+# cf_table <- cm2000$table
+# cm2000
+# 
+# dat <- matrix(cf_table, nrow=2, ncol=2, 
+#               dimnames=list(c("Not Gentrifying", "Gentrifying"), c("Not Gentrifying", "Gentrifying")))
+# 
+# # now set the names *of the dimensions* (not the row/colnames)
+# names(dimnames(dat)) <- c("Predicted", "Observed")
+# 
+# 
+# kable(dat,"latex", longtable = TRUE , booktabs = T, escape = F, caption = "Confusion Matrix", format.args = list(big.mark = ",")) %>% kable_styling(position = "center",font_size = 11, latex_options = c("hold_position", "repeat_header")) %>% add_header_above(c("Predicted" = 1, "Observed" = 2))
+# 
+# VarImportance <- varImp(RFmodel)
+# VarImpTable <- VarImportance$importance 
+# VarIMP <- setDT(VarImpTable, keep.rownames = TRUE)[]
+# VarImpSorted <- VarImpTable %>% dplyr::select(Variable = rn, Importance = X0) %>% arrange(desc(Importance)) %>% mutate(rank = dense_rank(desc(Importance))) %>% select(rank, Variable, Importance)
+#  
+# kable(VarImpSorted,"latex", longtable = TRUE , col.names = c("Ranking", "Variable", "Importance"),  booktabs = T, escape = F, digits = 2, caption = "Variable Importance", linesep = "", format.args = list(big.mark = ",")) %>% kable_styling(position = "center",font_size = 11, latex_options = c("hold_position", "repeat_header")) 
+# 
+# p_train <- predict(RFmodel, type = "prob")
+# 
+# df_dk <- rbind(data.frame(predictor = p_train[,2],
+#                        known.truth = train$BoolGentX,
+#                        Model = "Train"),
+#             data.frame(predictor = RFmodel_preds[,2],
+#                        known.truth = test$BoolGentX,
+#                        Model = "Test"))
+# 
+# 
+# k <- ggplot(df_dk, aes(d = known.truth, m = predictor, color = Model)) + 
+#   geom_roc(n.cuts = 0)+
+#   coord_equal() +
+#   style_roc() + labs(title = "ROC Plot")
+# 
+# k
+# 
+# 
+# 
+# RFtest <- predict(RFmodel, test, type = "prob")
+# p_testVec <- c(RFtest$X1)
+# p_trainVec <- c(p_train$X1)
+# 
+# roc_obj_test <- roc(test$BoolGentX, p_testVec)
+# testauc <- auc(roc_obj_test)
+# roc_obj_train <- roc(train$BoolGentX, p_trainVec)
+# auc(roc_obj_train)
+# 
+# 
+# summarystats <-  data.frame(cm2000$overall)
+# summarystats2 <- data.frame(cm2000$byClass)
+# AUC <- data.frame("AUC", testauc)
+# names(AUC) <- c("Metric", "Value")
+# 
+# sumtab2 <- setDT(summarystats2, keep.rownames = TRUE)[]
+# names(sumtab2) <- c("Metric", "Value")
+# sumtab <- setDT(summarystats, keep.rownames = TRUE)[]
+# names(sumtab) <- c("Metric", "Value")
+# allsumstats <- rbind(sumtab, sumtab2, fill = TRUE) %>% rbind(AUC, fill=TRUE)
+# stat <- c("AUC", "Accuracy", "Sensitivity", "Specificity", "Kappa", "Accuracy (Lower)", "Accuracy (Upper)", "Precision", "F1", "Balanced Accuracy")
+# 
+# print("almost done!")
+# #test_set <- RFmodel_preds %>% mutate(pred = as.factor(paste0("X", FinalPred))) %>% select(pred, obs = `test$BoolGentX`, X0, X1)
+# selectstats <- allsumstats %>% filter(Metric %in% stat) 
+# 
+# kable(selectstats,"latex", longtable = TRUE , booktabs = T, linesep = "", escape = F, digits = 3, caption = "Random Forest Model Performance", format.args = list(big.mark = ",")) %>% kable_styling(position = "center",font_size = 11, latex_options = c("hold_position", "repeat_header")) 
+# 
+# stat2 <- c("Accuracy", "AUC", "Sensitivity", "Specificity", "Precision",  "Kappa","F1", "Balanced Accuracy")
+# selectstats2 <- allsumstats %>% filter(Metric %in% stat2) 
+# cm2000
+
+
+data2016 <- readRDS("x2016Data.rds") %>% dplyr::select(-year,-MedHomevalue, -MedRent, -MedIncome, -MedianAgeBuilt, - CollegePct, -PctNonWhite, -Pct_MultiUnit, CensusTractID) %>% filter(complete.cases(.))
+
+IDs2016 <- data2016 %>% dplyr::select(CensusTractID) %>% filter(complete.cases(.))
+
+HousingAge16 <- read_rds("Census_HousingAge16.rds") %>% dplyr::select(-year)
+
+data2016x <- inner_join(data2016, HousingAge16)
+
+#Ordered16 <- data2016 %>% dplyr::select(Pct_Renters, Pct_Vacant, NonFamPct, Under18, Over65x, PovertyPct, UnemploymentPct, NoCarPct, Pct3Vehicles, PctPubCommute, PctCommuteless20min, PctBlueCollar, PctBigUnits, RentBurdenPct, Park_PctCoverage16, Dist2Downtown, Transit_PctCoverage, EvictionRate)
+
+Ordered16 <- data2016x %>% dplyr::select(Pct_Renters, Pct_Vacant, NonFamPct, Under18, Over65x, PovertyPct, UnemploymentPct, Pct3Vehicles, PctCommuteless20min, PctBlueCollar, PctBigUnits, RentBurdenPct, Park_PctCoverage16, Dist2Downtown, EvictionRate, PctNewHomes)
+
+
+
+
+names(Ordered16) <- names(train[2:17])
+
+Predictions16 <- predict(RFmodel, Ordered16, type = "prob") 
+Pred16_df <- as.data.frame(Predictions16) %>% cbind(IDs2016)
+foo<- bind_rows(foo, Pred16_df)
+}
+
+saveRDS(foo, "RF_MonteCarloResults200.rds")
+```
+
+```{r predictionmap, include=FALSE, warning=FALSE, echo=FALSE, message=FALSE}
+
+grpfoo <- foo %>% group_by(CensusTractID) %>% summarize(med = median(X1))
+jnfoo <- inner_join(foo, grpfoo) %>% filter(med > .20)
+boxplot(X1~med, data=jnfoo, outline = FALSE)
+
+ggplot(data = jnfoo, aes(x=med, y = X1, fill = CensusTractID)) + geom_boxplot() + theme(legend.position = "none")
+
+MC_summaryStats <- foo %>% group_by(CensusTractID) %>% summarize(med = median(X1), avg = mean(X1), LowerQtile = quantile(X1, .25), UpperQtile = quantile(X1, .75))
+
+breaks <- MC_summaryStats %>% mutate(diff = UpperQtile-LowerQtile)
+breakpts <- median(breaks$diff)
+
+Davidson <- tigris::tracts("TN", "Davidson")
+
+Davidson@data$JOINID = as.character(Davidson@data$GEOID)
+sp_jn1 <- geo_join(spatial_data = Davidson, data_frame = MC_summaryStats, by_sp = "JOINID", by_df = "CensusTractID", how = "inner")
+writeOGR(obj=sp_jn1, dsn="C://School//Research//Predictive Variables//Master//FinalPredictions", layer="RF_MonteCarlo", driver="ESRI Shapefile")
+
+Davidson_SF <- st_as_sf(sp_jn1)
+
+colors <- c("seagreen", "cornflowerblue","darkgoldenrod4","tomato", "purple")
+cols <- c("seagreen", "cornflowerblue","darkgoldenrod4","tomato", "purple")
+```
+\newpage
+```{r Predplot, warning=FALSE, echo=FALSE, message=FALSE}
+ggplot(Davidson_SF) + geom_sf(aes(fill = X1)) + scale_fill_gradient(low = "blue", high = "red") + coord_sf() + theme(legend.position="none")  + theme(legend.position = "right")  + theme(axis.text = element_blank(), axis.ticks = element_blank()) + labs(title = "Nashville Neighborhood Change Predictions", caption = "Geometries: tigris")
+```
+```

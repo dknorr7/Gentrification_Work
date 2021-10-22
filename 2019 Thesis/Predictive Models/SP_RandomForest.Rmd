@@ -1,0 +1,139 @@
+---
+title: "SP Lag RF"
+author: "David Knorr"
+date: "April 6, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+
+library(pacman)
+p_load(tidyverse, caret, spdep, rgdal, rgeos, factoextra, tigris, randomForest, pROC, plotROC, knitr, kableExtra)
+
+Dependent <- readRDS("DependentVariable.rds")
+Lagged <- readRDS("lagged2000Variables.rds")
+PredictiveVars2000 <- readRDS("PredictiveVars1990_2000.rds") %>% dplyr::select(-contains("90"), - contains("welfare"), -contains("kids"))
+
+knitr::knit_hooks$set(inline = function(x) { if(!is.numeric(x)){ x }else{ prettyNum(round(x,2), big.mark=",") } })
+
+knitr::opts_chunk$set(fig.width=12, fig.height=7) 
+options(knitr.table.format = "latex")
+```
+
+```{r splag, include=FALSE}
+myshp <- readOGR("C:\\School\\Research\\census\\Davidson_Tracts_utm.shp")
+myshp@data$JOINID = as.character(myshp@data$GEOID)
+sp_jn2000 <- geo_join(spatial_data = myshp, data_frame = PredictiveVars2000, by_sp = "JOINID", by_df = "CensusTractID", how = "inner")
+
+
+tolag <- sp_jn2000@data[,16:33]
+queen.nb = poly2nb(sp_jn2000, queen = FALSE)
+queen.listw = nb2listw(queen.nb)
+listw1 <- queen.listw
+
+lag1 <- create_WX(tolag, listw1, prefix= "lag")
+lagged2000 <- Dependent %>% cbind(lag1)
+
+```
+
+```{r setup}
+OrigVs <- c(names(PredictiveVars2000))
+PrettyNamedVs <- c("CensusTractID", "LAG_PCTRENTER", "LAG_PCTVACANT", "LAG_PCTNONFAM", "LAG_UNDER18", "LAG_OVER65", "LAG_PCTPOV", "LAG_PCTUNEMPLOY", "LAG_PCTNOCAR", "LAG_PCT3CAR", "LAG_PCTPUBTRANSP", "LAG_PCT20MINCOMMUTE", "LAG_PCTBLUECOLLAR", "LAG_PCTBIGUNIT", "LAG_PCTRENTBURDEN", "LAG_PARKCOVERAGE", "LAG_DOWNTOWNDISTANCE", "LAG_TRANSITCOVERAGE", "LAG_EVICTIONRATE", "PCTRENTER", "PCTVACANT", "PCTNONFAM", "UNDER18", "OVER65", "PCTPOV", "PCTUNEMPLOY", "PCTNOCAR", "PCT3CAR", "PCTPUBTRANSP", "PCT20MINCOMMUTE", "PCTBLUECOLLAR",  "PCTBIGUNIT", "PCTRENTBURDEN", "PARKCOVERAGE", "DOWNTOWNDISTANCE", "TRANSITCOVERAGE", "EVICTIONRATE")
+
+VarSwap <- data.frame(OrigVs, PrettyNamedVs) %>% mutate(joinid = gsub("_", "", OrigVs)) %>% filter(OrigVs != "CensusTractID")
+
+LagVariables <- c("BoolGentX", "LAG_PCTRENTER", "LAG_PCTVACANT", "LAG_PCTNONFAM", "LAG_UNDER18", "LAG_OVER65", "LAG_PCTPOV", "LAG_PCTUNEMPLOY", "LAG_PCTNOCAR", "LAG_PCT3CAR", "LAG_PCTPUBTRANSP", "LAG_PCT20MINCOMMUTE", "LAG_PCTBLUECOLLAR", "LAG_PCTBIGUNIT", "LAG_PCTRENTBURDEN", "LAG_PARKCOVERAGE", "LAG_DOWNTOWNDISTANCE", "LAG_TRANSITCOVERAGE", "LAG_EVICTIONRATE", "PCTRENTER", "PCTVACANT", "PCTNONFAM", "UNDER18", "OVER65", "PCTPOV", "PCTUNEMPLOY", "PCTNOCAR", "PCT3CAR", "PCTPUBTRANSP", "PCT20MINCOMMUTE", "PCTBLUECOLLAR", "PCTBIGUNIT", "PCTRENTBURDEN", "PARKCOVERAGE", "DOWNTOWNDISTANCE", "TRANSITCOVERAGE", "EVICTIONRATE")
+
+Both <- inner_join(lagged2000, PredictiveVars2000)
+RF_raw <- Both %>% select(-BoolGent)
+
+RF_named <- RF_raw %>% dplyr::select(CensusTractID)
+
+RF_labeled <- Both %>% dplyr::select(-CensusTractID, -BoolGent)
+names(RF_labeled) <- LagVariables
+
+RF_labeled <- RF_labeled %>% select(-LAG_DOWNTOWNDISTANCE)
+
+
+
+
+trainingindexes <- createDataPartition(RF_labeled$BoolGentX, p = .7, list = FALSE) #maintains proportions of gent/nongent
+train <- RF_labeled[trainingindexes,]
+test <- RF_labeled[-trainingindexes,]
+
+
+train.control <- trainControl(method = "LOOCV", classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE)
+tunegrid <- expand.grid(.mtry = (3:7))
+
+
+RFmodel<- train(BoolGentX~., data = train, method = "rf", trControl = train.control, metric = "ROC", tuneGrid = tunegrid) 
+
+print(RFmodel)
+plot(RFmodel)
+
+RFmodel_probs <- predict(RFmodel, test, type = "prob") %>% cbind(test$BoolGentX)
+
+RFmodel_probs$BoolGent <- as.factor(ifelse(test$BoolGentX == "X0", 0, 1))
+test$BoolGent <- as.factor(ifelse(test$BoolGentX == "X0", 0, 1))
+
+RFmodel_thresholds <- SDMTools::optim.thresh(test$BoolGent, RFmodel_probs$X0)
+
+RFmodel_preds <- RFmodel_probs %>% mutate(FinalPred = as.factor(ifelse(`X0` <= RFmodel_thresholds$`sensitivity=specificity`[1], 1, 0)))
+
+cm2000 <- confusionMatrix(RFmodel_preds$FinalPred, test$BoolGent, positive = "1")
+
+varImp(RFmodel)
+
+```
+
+```{r predictions, echo= FALSE, eval = FALSE}
+data2016 <- readRDS("x2016Data.rds") %>% dplyr::select(-year,-MedHomevalue, -MedRent, -MedIncome, -MedianAgeBuilt, - CollegePct, -PctNonWhite, -Pct_MultiUnit, CensusTractID) %>% filter(complete.cases(.))
+
+data16names <- data2016 %>% select(CensusTractID)
+
+myshp16 <- readOGR("C:\\School\\Research\\census\\Davidson_Tracts_utm.shp")
+myshp16@data$JOINID = as.character(myshp16@data$GEOID)
+sp_jn2016 <- geo_join(spatial_data = myshp16, data_frame = data2016, by_sp = "JOINID", by_df = "CensusTractID", how = "inner")
+
+
+tolag <- sp_jn2016@data[,16:35]
+queen.nb = poly2nb(sp_jn2016, queen = FALSE)
+queen.listw = nb2listw(queen.nb)
+listw1 <- queen.listw
+
+lag1 <- create_WX(tolag, listw1, prefix= "lag")
+lagged2016 <- data16names %>% cbind(lag1)
+
+
+
+lagOrdered16 <- lagged2016 %>% dplyr::select(lag.Pct_Renters, lag.Pct_Vacant, lag.NonFamPct, lag.Under18, lag.Over65x, lag.PovertyPct, lag.UnemploymentPct, lag.NoCarPct, lag.Pct3Vehicles, lag.PctPubCommute, lag.PctCommuteless20min, lag.PctBlueCollar, lag.PctBigUnits, lag.RentBurdenPct, lag.Park_PctCoverage16,lag.Transit_PctCoverage, lag.EvictionRate)
+
+IDs2016 <- data2016 %>% dplyr::select(CensusTractID) %>% filter(complete.cases(.))
+
+Ordered16 <- data2016 %>% dplyr::select(Pct_Renters, Pct_Vacant, NonFamPct, Under18, Over65x, PovertyPct, UnemploymentPct, NoCarPct, Pct3Vehicles, PctPubCommute, PctCommuteless20min, PctBlueCollar, PctBigUnits, RentBurdenPct, Park_PctCoverage16, Dist2Downtown, Transit_PctCoverage, EvictionRate)
+
+ALL <- cbind(lagOrdered16, Ordered16)
+
+names(ALL) <- names(train[2:36])
+
+
+Predictions16 <- predict(RFmodel, ALL, type = "prob") 
+
+
+Pred16_df <- as.data.frame(Predictions16) %>% cbind(IDs2016)
+
+
+Davidson <- tracts("TN", "Davidson")
+
+Davidson@data$JOINID = as.character(Davidson@data$GEOID)
+sp_jn1 <- geo_join(spatial_data = Davidson, data_frame = Pred16_df, by_sp = "JOINID", by_df = "CensusTractID", how = "inner")
+writeOGR(obj=sp_jn1, dsn="C://School//Research//Predictive Variables//Master//FinalPredictions", layer="SPRF_PredictionProbs", driver="ESRI Shapefile")
+
+Davidson_SF <- st_as_sf(sp_jn1)
+
+colors <- c("seagreen", "cornflowerblue","darkgoldenrod4","tomato", "purple")
+cols <- c("seagreen", "cornflowerblue","darkgoldenrod4","tomato", "purple")
+
+ggplot(Davidson_SF) + geom_sf(aes(fill = X1)) + scale_fill_gradient(low = "blue", high = "red") + coord_sf() + theme(legend.position="none")  + theme(legend.position = "right")  + theme(axis.text = element_blank(), axis.ticks = element_blank()) + labs(title = "Nashville Neighborhood Change Predictions", caption = "Geometries: tigris")
+
+```
